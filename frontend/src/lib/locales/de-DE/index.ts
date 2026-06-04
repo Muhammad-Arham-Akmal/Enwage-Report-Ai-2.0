@@ -54,6 +54,8 @@ export const deDE = {
     linked: "Verknüpft",
     adding: "Hinzufügen...",
     addSelected: "Ausgewählte hinzufügen",
+    selectAll: "Alle auswählen",
+    deselectAll: "Alle abwählen",
     customModel: "Benutzerdefiniertes Modell",
     failed: "fehlgeschlagen",
     current: "Aktuell",

@@ -51,6 +51,8 @@ export const frFR = {
     linked: "Lié",
     adding: "Ajout en cours...",
     addSelected: "Ajouter la sélection",
+    selectAll: "Tout sélectionner",
+    deselectAll: "Tout désélectionner",
     customModel: "Modèle personnalisé",
     failed: "échec",
     current: "Actuel",

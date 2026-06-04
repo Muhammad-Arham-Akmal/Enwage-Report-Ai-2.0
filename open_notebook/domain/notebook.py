@@ -432,6 +432,8 @@ class Source(ObjectModel):
             if not self.full_text or not self.full_text.strip():
                 raise ValueError(f"Source {self.id} has no text to vectorize")
 
+            importlib.import_module("commands.embedding_commands")
+
             # Submit the embed_source command
             command_id = submit_command(
                 "open_notebook",
@@ -582,6 +584,9 @@ class Note(ObjectModel):
 
         # Submit embedding command (fire-and-forget) if note has content
         if self.id and self.content and self.content.strip():
+            # Ensure embedding commands are registered before submitting the job.
+            importlib.import_module("commands.embedding_commands")
+
             command_id = submit_command(
                 "open_notebook",
                 "embed_note",

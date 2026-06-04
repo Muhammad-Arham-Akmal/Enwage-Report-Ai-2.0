@@ -51,6 +51,8 @@ export const caES = {
     linked: "Enllaçat",
     adding: "S'està afegint...",
     addSelected: "Afegeix la selecció",
+    selectAll: "Selecciona-ho tot",
+    deselectAll: "Desselecciona-ho tot",
     customModel: "Model personalitzat",
     failed: "ha fallat",
     current: "Actual",

@@ -102,6 +102,11 @@ async def embed_content(embed_request: EmbedRequest):
                 command_id=command_id,
             )
 
+    except ValueError as e:
+        logger.warning(
+            f"Validation failed while embedding {embed_request.item_type} {embed_request.item_id}: {str(e)}"
+        )
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

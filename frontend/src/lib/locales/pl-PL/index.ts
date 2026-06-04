@@ -51,6 +51,8 @@ export const plPL = {
     linked: "Powiązane",
     adding: "Dodawanie...",
     addSelected: "Dodaj zaznaczone",
+    selectAll: "Zaznacz wszystko",
+    deselectAll: "Odznacz wszystko",
     customModel: "Model niestandardowy",
     failed: "niepowodzenie",
     current: "Bieżący",

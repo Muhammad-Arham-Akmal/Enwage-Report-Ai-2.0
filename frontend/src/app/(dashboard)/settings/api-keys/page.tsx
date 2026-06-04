@@ -497,6 +497,11 @@ function DiscoverModelsDialog({
     return !discoveredModels.some(m => m.name.toLowerCase() === q)
   }, [discoveredModels, searchQuery])
 
+  const filteredSelectedCount = useMemo(
+    () => filteredModels.filter(m => selectedModels.has(m.name)).length,
+    [filteredModels, selectedModels]
+  )
+
   const handleRegister = () => {
     const selected = discoveredModels
       .filter(m => selectedModels.has(m.name))
@@ -549,7 +554,7 @@ function DiscoverModelsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>
             {t('models.discoverModels')} - {PROVIDER_DISPLAY_NAMES[credential.provider] || credential.provider}
@@ -559,101 +564,105 @@ function DiscoverModelsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {discoverModels.isPending ? (
-          <div className="flex items-center justify-center py-12">
-            <LoadingSpinner size="lg" />
-          </div>
-        ) : discoveryError ? (
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{discoveryError}</AlertDescription>
-          </Alert>
-        ) : (
-          <div className="space-y-4">
-            {/* Model type selector */}
-            <div className="space-y-2">
-              <Label>{t('models.modelType')}</Label>
-              <Select value={selectedType} onValueChange={(v) => setSelectedType(v as ModelType)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(PROVIDER_MODALITIES[credential.provider] || credential.modalities as ModelType[]).map(type => (
-                    <SelectItem key={type} value={type}>
-                      <div className="flex items-center gap-2">
-                        {TYPE_ICONS[type]}
-                        {TYPE_LABELS[type]}
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">{t('models.modelTypeHint')}</p>
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-4">
+          {discoverModels.isPending ? (
+            <div className="flex items-center justify-center py-12">
+              <LoadingSpinner size="lg" />
             </div>
-
-            {/* Search input */}
-            <input
-              type="text"
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm placeholder:text-muted-foreground"
-              placeholder={t('models.searchOrAddModel')}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-
-            {/* Select all / count (only when there are discovered models to select) */}
-            {filteredModels.length > 0 && (
-              <div className="flex items-center justify-between">
-                <Button variant="outline" size="sm" onClick={toggleAll}>
-                  {filteredModels.every(m => selectedModels.has(m.name)) ? t('common.remove') : t('common.addSelected')}
-                  {' '}({selectedModels.size}/{filteredModels.length})
-                </Button>
+          ) : discoveryError ? (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{discoveryError}</AlertDescription>
+            </Alert>
+          ) : (
+            <div className="space-y-4">
+              {/* Model type selector */}
+              <div className="space-y-2">
+                <Label>{t('models.modelType')}</Label>
+                <Select value={selectedType} onValueChange={(v) => setSelectedType(v as ModelType)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(PROVIDER_MODALITIES[credential.provider] || credential.modalities as ModelType[]).map(type => (
+                      <SelectItem key={type} value={type}>
+                        <div className="flex items-center gap-2">
+                          {TYPE_ICONS[type]}
+                          {TYPE_LABELS[type]}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t('models.modelTypeHint')}</p>
               </div>
-            )}
 
-            {/* Model list */}
-            <div className="space-y-1 max-h-60 overflow-y-auto">
-              {filteredModels.map((model) => (
-                <label
-                  key={model.name}
-                  className="flex items-center gap-2 p-1.5 rounded hover:bg-muted cursor-pointer text-sm"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedModels.has(model.name)}
-                    onChange={() => toggleModel(model.name)}
-                    className="rounded"
-                  />
-                  <span className="truncate">{model.name}</span>
-                  {model.description && model.description !== model.name && (
-                    <span className="text-xs text-muted-foreground truncate">({model.description})</span>
-                  )}
-                </label>
-              ))}
+              {/* Search input */}
+              <input
+                type="text"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm placeholder:text-muted-foreground"
+                placeholder={t('models.searchOrAddModel')}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
 
-              {/* Custom model option */}
-              {showCustomOption && (
-                <label className={`flex items-center gap-2 p-1.5 rounded hover:bg-muted cursor-pointer text-sm${filteredModels.length > 0 ? ' border-t mt-1 pt-2' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={customModelSelected}
-                    onChange={() => setCustomModelSelected(prev => !prev)}
-                    className="rounded"
-                  />
-                  <Plus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                  <span className="truncate">
-                    {t('models.addCustomModel').replace('{name}', searchQuery.trim())}
-                  </span>
-                </label>
+              {/* Select all / count (only when there are discovered models to select) */}
+              {filteredModels.length > 0 && (
+                <div className="flex items-center justify-between">
+                  <Button variant="outline" size="sm" onClick={toggleAll}>
+                    {filteredModels.every(m => selectedModels.has(m.name))
+                      ? t('common.deselectAll')
+                      : t('common.selectAll')}
+                    {' '}({filteredSelectedCount}/{filteredModels.length})
+                  </Button>
+                </div>
               )}
 
-              {filteredModels.length === 0 && !showCustomOption && (
-                <p className="text-center py-4 text-muted-foreground text-sm">{t('models.noModelsFound')}</p>
-              )}
+              {/* Model list */}
+              <div className="space-y-1 max-h-60 overflow-y-auto">
+                {filteredModels.map((model) => (
+                  <label
+                    key={model.name}
+                    className="flex items-center gap-2 p-1.5 rounded hover:bg-muted cursor-pointer text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedModels.has(model.name)}
+                      onChange={() => toggleModel(model.name)}
+                      className="rounded"
+                    />
+                    <span className="truncate">{model.name}</span>
+                    {model.description && model.description !== model.name && (
+                      <span className="text-xs text-muted-foreground truncate">({model.description})</span>
+                    )}
+                  </label>
+                ))}
+
+                {/* Custom model option */}
+                {showCustomOption && (
+                  <label className={`flex items-center gap-2 p-1.5 rounded hover:bg-muted cursor-pointer text-sm${filteredModels.length > 0 ? ' border-t mt-1 pt-2' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={customModelSelected}
+                      onChange={() => setCustomModelSelected(prev => !prev)}
+                      className="rounded"
+                    />
+                    <Plus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <span className="truncate">
+                      {t('models.addCustomModel').replace('{name}', searchQuery.trim())}
+                    </span>
+                  </label>
+                )}
+
+                {filteredModels.length === 0 && !showCustomOption && (
+                  <p className="text-center py-4 text-muted-foreground text-sm">{t('models.noModelsFound')}</p>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t pt-4">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {t('common.cancel')}
           </Button>
@@ -662,7 +671,7 @@ function DiscoverModelsDialog({
             disabled={totalSelected === 0 || registerModels.isPending}
           >
             {registerModels.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-            {t('common.add')} ({totalSelected})
+            {t('common.addSelected')} ({totalSelected})
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1149,7 +1158,7 @@ function DefaultModelSelectors({
   const handleChange = (key: keyof ModelDefaults, value: string) => {
     if (key === 'default_embedding_model') {
       const current = defaults[key]
-      if (current && current !== value) {
+      if (current !== value) {
         setPendingEmbeddingChange({ key, value, oldModelId: current, newModelId: value })
         setShowEmbeddingDialog(true)
         return
@@ -1310,7 +1319,7 @@ function DefaultModelSelectors({
         open={showEmbeddingDialog}
         onOpenChange={(open) => { if (!open) { setPendingEmbeddingChange(null); setShowEmbeddingDialog(false) } }}
         onConfirm={handleConfirmEmbeddingChange}
-        oldModelName={pendingEmbeddingChange?.oldModelId ? models.find(m => m.id === pendingEmbeddingChange.oldModelId)?.name : undefined}
+        oldModelName={pendingEmbeddingChange?.oldModelId ? models.find(m => m.id === pendingEmbeddingChange.oldModelId)?.name : t('common.notSet')}
         newModelName={pendingEmbeddingChange?.newModelId ? models.find(m => m.id === pendingEmbeddingChange.newModelId)?.name : undefined}
       />
     </Card>

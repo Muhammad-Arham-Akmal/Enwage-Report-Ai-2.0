@@ -51,6 +51,8 @@ export const enUS = {
     linked: "Linked",
     adding: "Adding...",
     addSelected: "Add Selected",
+    selectAll: "Select All",
+    deselectAll: "Deselect All",
     customModel: "Custom Model",
     failed: "failed",
     current: "Current",

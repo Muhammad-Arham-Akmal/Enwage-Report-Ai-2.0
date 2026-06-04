@@ -51,6 +51,8 @@ export const zhTW = {
     linked: "已連結",
     adding: "正在新增...",
     addSelected: "新增所選",
+    selectAll: "全選",
+    deselectAll: "取消全選",
     customModel: "自訂模型",
     failed: "失敗",
     current: "目前",

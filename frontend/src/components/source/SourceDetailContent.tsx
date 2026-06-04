@@ -63,6 +63,7 @@ import {
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { getDateLocale } from '@/lib/utils/date-locale'
+import { getApiErrorMessage } from '@/lib/utils/error-handler'
 import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { SourceInsightDialog } from '@/components/source/SourceInsightDialog'
@@ -236,7 +237,7 @@ export function SourceDetailContent({
       await fetchSource()
     } catch (err) {
       console.error('Failed to embed content:', err)
-      toast.error(t('common.error'))
+      toast.error(getApiErrorMessage(err, (key) => t(key), 'common.error'))
     } finally {
       setIsEmbedding(false)
     }
