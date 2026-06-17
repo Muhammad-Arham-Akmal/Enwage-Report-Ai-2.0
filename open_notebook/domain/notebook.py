@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import os
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
@@ -326,7 +327,10 @@ class Source(ObjectModel):
             status = await get_command_status(str(self.command))
             return status.status if status else "unknown"
         except Exception as e:
-            logger.warning(f"Failed to get command status for {self.command}: {e}")
+            logger.opt(exception=e).warning(
+                "Failed to get command status for source: "
+                f"source_id={self.id} command_id={self.command}"
+            )
             return "unknown"
 
     async def get_processing_progress(self) -> Optional[Dict[str, Any]]:
@@ -339,6 +343,10 @@ class Source(ObjectModel):
 
             status_result = await get_command_status(str(self.command))
             if not status_result:
+                logger.warning(
+                    "Command status lookup returned no result: "
+                    f"source_id={self.id} command_id={self.command}"
+                )
                 return None
 
             # Extract execution metadata if available
@@ -355,7 +363,10 @@ class Source(ObjectModel):
                 "result": result,
             }
         except Exception as e:
-            logger.warning(f"Failed to get command progress for {self.command}: {e}")
+            logger.opt(exception=e).warning(
+                "Failed to get command progress for source: "
+                f"source_id={self.id} command_id={self.command}"
+            )
             return None
 
     async def get_context(
@@ -408,7 +419,7 @@ class Source(ObjectModel):
             raise InvalidInputError("Notebook ID must be provided")
         return await self.relate("reference", notebook_id)
 
-    async def vectorize(self) -> str:
+    async def vectorize(self, trace_id: Optional[str] = None) -> str:
         """
         Submit vectorization as a background job using the embed_source command.
 
@@ -426,7 +437,11 @@ class Source(ObjectModel):
             ValueError: If source has no text to vectorize
             DatabaseOperationError: If job submission fails
         """
-        logger.info(f"Submitting embed_source job for source {self.id}")
+        logger.info(
+            "Submitting embed_source job for source: "
+            f"trace_id={trace_id} source_id={self.id} "
+            f"content_chars={len(self.full_text or '')}"
+        )
 
         try:
             if not self.full_text or not self.full_text.strip():
@@ -434,16 +449,21 @@ class Source(ObjectModel):
 
             importlib.import_module("commands.embedding_commands")
 
+            command_args = {"source_id": str(self.id)}
+            if trace_id:
+                command_args["trace_id"] = trace_id
+
             # Submit the embed_source command
             command_id = submit_command(
                 "open_notebook",
                 "embed_source",
-                {"source_id": str(self.id)},
+                command_args,
             )
 
             command_id_str = str(command_id)
             logger.info(
-                f"Embed source job submitted for source {self.id}: "
+                "Embed source job submitted for source: "
+                f"trace_id={trace_id} source_id={self.id} "
                 f"command_id={command_id_str}"
             )
 
@@ -452,10 +472,10 @@ class Source(ObjectModel):
         except ValueError:
             raise
         except Exception as e:
-            logger.error(
-                f"Failed to submit embed_source job for source {self.id}: {e}"
+            logger.opt(exception=e).error(
+                "Failed to submit embed_source job for source: "
+                f"trace_id={trace_id} source_id={self.id}"
             )
-            logger.exception(e)
             raise DatabaseOperationError(e)
 
     async def add_insight(self, insight_type: str, content: str) -> Optional[str]:

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -34,6 +35,11 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.exceptions import InvalidInputError
+from open_notebook.utils.tracing import (
+    new_trace_id,
+    summarize_content_state,
+    summarize_upload,
+)
 
 router = APIRouter()
 
@@ -70,13 +76,14 @@ def generate_unique_filename(original_filename: str, upload_folder: str) -> str:
         counter += 1
 
 
-async def save_uploaded_file(upload_file: UploadFile) -> str:
+async def save_uploaded_file(upload_file: UploadFile, trace_id: Optional[str] = None) -> str:
     """Save uploaded file to uploads folder and return file path."""
     if not upload_file.filename:
         raise ValueError("No filename provided")
 
     # Generate unique filename
     file_path = generate_unique_filename(upload_file.filename, UPLOADS_FOLDER)
+    upload_summary = summarize_upload(upload_file.filename, upload_file.content_type)
 
     try:
         # Save file
@@ -84,10 +91,17 @@ async def save_uploaded_file(upload_file: UploadFile) -> str:
             content = await upload_file.read()
             f.write(content)
 
-        logger.info(f"Saved uploaded file to: {file_path}")
+        logger.info(
+            "Saved uploaded file: "
+            f"trace_id={trace_id} path={file_path} bytes={len(content)} "
+            f"upload={upload_summary}"
+        )
         return file_path
     except Exception as e:
-        logger.error(f"Failed to save uploaded file: {e}")
+        logger.opt(exception=e).error(
+            "Failed to save uploaded file: "
+            f"trace_id={trace_id} path={file_path} upload={upload_summary}"
+        )
         # Clean up partial file if it exists
         if os.path.exists(file_path):
             os.unlink(file_path)
@@ -294,11 +308,23 @@ async def create_source(
 ):
     """Create a new source with support for both JSON and multipart form data."""
     source_data, upload_file = form_data
+    trace_id = new_trace_id("source")
+    started_at = time.monotonic()
 
     # Initialize file_path before try block so exception handlers can reference it
     file_path = None
 
     try:
+        logger.info(
+            "Create source request received: "
+            f"trace_id={trace_id} type={source_data.type} "
+            f"async_processing={source_data.async_processing} embed={source_data.embed} "
+            f"delete_source={source_data.delete_source} notebooks={source_data.notebooks} "
+            f"transformations={source_data.transformations or []} "
+            f"upload={summarize_upload(upload_file.filename, upload_file.content_type) if upload_file else None} "
+            f"input={summarize_content_state({'url': source_data.url, 'file_path': source_data.file_path, 'content': source_data.content})}"
+        )
+
         # Verify all specified notebooks exist (backward compatibility support)
         for notebook_id in source_data.notebooks or []:
             notebook = await Notebook.get(notebook_id)
@@ -310,9 +336,11 @@ async def create_source(
         # Handle file upload if provided
         if upload_file and source_data.type == "upload":
             try:
-                file_path = await save_uploaded_file(upload_file)
+                file_path = await save_uploaded_file(upload_file, trace_id=trace_id)
             except Exception as e:
-                logger.error(f"File upload failed: {e}")
+                logger.opt(exception=e).error(
+                    f"File upload failed: trace_id={trace_id}"
+                )
                 raise HTTPException(
                     status_code=400, detail=f"File upload failed: {str(e)}"
                 )
@@ -356,6 +384,11 @@ async def create_source(
                 detail="Invalid source type. Must be link, upload, or text",
             )
 
+        logger.info(
+            "Prepared source content state: "
+            f"trace_id={trace_id} content_state={summarize_content_state(content_state)}"
+        )
+
         # Validate transformations exist
         transformation_ids = source_data.transformations or []
         for trans_id in transformation_ids:
@@ -364,11 +397,16 @@ async def create_source(
                 raise HTTPException(
                     status_code=404, detail=f"Transformation {trans_id} not found"
                 )
+        logger.info(
+            "Validated source request dependencies: "
+            f"trace_id={trace_id} notebook_count={len(source_data.notebooks or [])} "
+            f"transformation_count={len(transformation_ids)}"
+        )
 
         # Branch based on processing mode
         if source_data.async_processing:
             # ASYNC PATH: Create source record first, then queue command
-            logger.info("Using async processing path")
+            logger.info(f"Using async source processing path: trace_id={trace_id}")
 
             # Create source record with asset - let SurrealDB generate the ID
             # Persist asset before save so it's available for retry if processing fails
@@ -385,11 +423,21 @@ async def create_source(
                 asset=source_asset,
             )
             await source.save()
+            logger.info(
+                "Created placeholder source before async processing: "
+                f"trace_id={trace_id} source_id={source.id} "
+                f"asset={summarize_content_state({'url': source_data.url, 'file_path': file_path or source_data.file_path})}"
+            )
 
             # Add source to notebooks immediately so it appears in the UI
             # The source_graph will skip adding duplicates
             for notebook_id in source_data.notebooks or []:
                 await source.add_to_notebook(notebook_id)
+            logger.info(
+                "Attached source to notebooks before async processing: "
+                f"trace_id={trace_id} source_id={source.id} "
+                f"notebook_count={len(source_data.notebooks or [])}"
+            )
 
             try:
                 # Import command modules to ensure they're registered
@@ -402,20 +450,29 @@ async def create_source(
                     notebook_ids=source_data.notebooks,
                     transformations=transformation_ids,
                     embed=source_data.embed,
+                    trace_id=trace_id,
                 )
 
                 command_id = await CommandService.submit_command_job(
                     "open_notebook",  # app name
                     "process_source",  # command name
                     command_input.model_dump(),
+                    context={"trace_id": trace_id, "source_id": str(source.id)},
                 )
 
-                logger.info(f"Submitted async processing command: {command_id}")
+                logger.info(
+                    "Submitted async source processing command: "
+                    f"trace_id={trace_id} source_id={source.id} command_id={command_id}"
+                )
 
                 # Update source with command reference immediately
                 # command_id already includes 'command:' prefix
                 source.command = ensure_record_id(command_id)
                 await source.save()
+                logger.info(
+                    "Linked source to async processing command: "
+                    f"trace_id={trace_id} source_id={source.id} command_id={command_id}"
+                )
 
                 # Return source with command info
                 return SourceResponse(
@@ -430,11 +487,18 @@ async def create_source(
                     updated=str(source.updated),
                     command_id=command_id,
                     status="new",
-                    processing_info={"async": True, "queued": True},
+                    processing_info={
+                        "async": True,
+                        "queued": True,
+                        "trace_id": trace_id,
+                    },
                 )
 
             except Exception as e:
-                logger.error(f"Failed to submit async processing command: {e}")
+                logger.opt(exception=e).error(
+                    "Failed to submit async source processing command: "
+                    f"trace_id={trace_id} source_id={source.id}"
+                )
                 # Clean up source record on command submission failure
                 try:
                     await source.delete()
@@ -452,7 +516,7 @@ async def create_source(
 
         else:
             # SYNC PATH: Execute synchronously using execute_command_sync
-            logger.info("Using sync processing path")
+            logger.info(f"Using sync source processing path: trace_id={trace_id}")
 
             try:
                 # Import command modules to ensure they're registered
@@ -477,6 +541,7 @@ async def create_source(
                     notebook_ids=source_data.notebooks,
                     transformations=transformation_ids,
                     embed=source_data.embed,
+                    trace_id=trace_id,
                 )
 
                 # Run in thread pool to avoid blocking the event loop
@@ -491,7 +556,11 @@ async def create_source(
                 )
 
                 if not result.is_success():
-                    logger.error(f"Sync processing failed: {result.error_message}")
+                    logger.error(
+                        "Sync source processing command failed: "
+                        f"trace_id={trace_id} source_id={source.id} "
+                        f"error={result.error_message}"
+                    )
                     # Clean up source record
                     try:
                         await source.delete()
@@ -518,6 +587,12 @@ async def create_source(
                     )
 
                 embedded_chunks = await processed_source.get_embedded_chunks()
+                logger.info(
+                    "Sync source processing completed: "
+                    f"trace_id={trace_id} source_id={processed_source.id} "
+                    f"embedded_chunks={embedded_chunks} "
+                    f"elapsed={time.monotonic() - started_at:.2f}s"
+                )
                 return SourceResponse(
                     id=processed_source.id or "",
                     title=processed_source.title,
@@ -541,7 +616,9 @@ async def create_source(
                 )
 
             except Exception as e:
-                logger.error(f"Sync processing failed: {e}")
+                logger.opt(exception=e).error(
+                    f"Sync source processing failed: trace_id={trace_id}"
+                )
                 # Clean up uploaded file if we created it
                 if file_path and upload_file:
                     try:
@@ -550,7 +627,12 @@ async def create_source(
                         pass
                 raise
 
-    except HTTPException:
+    except HTTPException as e:
+        logger.warning(
+            "Create source request failed: "
+            f"trace_id={trace_id} status_code={e.status_code} detail={e.detail} "
+            f"elapsed={time.monotonic() - started_at:.2f}s"
+        )
         # Clean up uploaded file on HTTP exceptions if we created it
         if file_path and upload_file:
             try:
@@ -559,6 +641,11 @@ async def create_source(
                 pass
         raise
     except InvalidInputError as e:
+        logger.warning(
+            "Create source request rejected: "
+            f"trace_id={trace_id} error={e} "
+            f"elapsed={time.monotonic() - started_at:.2f}s"
+        )
         # Clean up uploaded file on validation errors if we created it
         if file_path and upload_file:
             try:
@@ -567,7 +654,10 @@ async def create_source(
                 pass
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error creating source: {str(e)}")
+        logger.opt(exception=e).error(
+            "Unexpected error creating source: "
+            f"trace_id={trace_id} elapsed={time.monotonic() - started_at:.2f}s"
+        )
         # Clean up uploaded file on unexpected errors if we created it
         if file_path and upload_file:
             try:
@@ -821,7 +911,13 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 @router.post("/sources/{source_id}/retry", response_model=SourceResponse)
 async def retry_source_processing(source_id: str):
     """Retry processing for a failed or stuck source."""
+    trace_id = new_trace_id("source_retry")
+    started_at = time.monotonic()
     try:
+        logger.info(
+            "Retry source processing request received: "
+            f"trace_id={trace_id} source_id={source_id}"
+        )
         # First, verify source exists
         source = await Source.get(source_id)
         if not source:
@@ -831,14 +927,22 @@ async def retry_source_processing(source_id: str):
         if source.command:
             try:
                 status = await source.get_status()
+                logger.info(
+                    "Checked existing source processing status before retry: "
+                    f"trace_id={trace_id} source_id={source_id} "
+                    f"command_id={source.command} status={status}"
+                )
                 if status in ["running", "queued"]:
                     raise HTTPException(
                         status_code=400,
                         detail="Source is already processing. Cannot retry while processing is active.",
                     )
+            except HTTPException:
+                raise
             except Exception as e:
-                logger.warning(
-                    f"Failed to check current status for source {source_id}: {e}"
+                logger.opt(exception=e).warning(
+                    "Failed to check current status before retry; continuing: "
+                    f"trace_id={trace_id} source_id={source_id}"
                 )
                 # Continue with retry if we can't check status
 
@@ -875,6 +979,13 @@ async def retry_source_processing(source_id: str):
                     status_code=400, detail="Cannot determine source content for retry"
                 )
 
+        logger.info(
+            "Prepared retry source content state: "
+            f"trace_id={trace_id} source_id={source_id} "
+            f"notebook_count={len(notebook_ids)} "
+            f"content_state={summarize_content_state(content_state)}"
+        )
+
         try:
             # Import command modules to ensure they're registered
             import commands.source_commands  # noqa: F401
@@ -886,24 +997,32 @@ async def retry_source_processing(source_id: str):
                 notebook_ids=notebook_ids,
                 transformations=[],  # Use default transformations on retry
                 embed=True,  # Always embed on retry
+                trace_id=trace_id,
             )
 
             command_id = await CommandService.submit_command_job(
                 "open_notebook",  # app name
                 "process_source",  # command name
                 command_input.model_dump(),
+                context={"trace_id": trace_id, "source_id": str(source.id)},
             )
 
             logger.info(
-                f"Submitted retry processing command: {command_id} for source {source_id}"
+                "Submitted retry source processing command: "
+                f"trace_id={trace_id} source_id={source_id} command_id={command_id}"
             )
 
             # Update source with new command ID
-            source.command = ensure_record_id(f"command:{command_id}")
+            source.command = ensure_record_id(command_id)
             await source.save()
 
             # Get current embedded chunks count
             embedded_chunks = await source.get_embedded_chunks()
+            logger.info(
+                "Retry source processing queued: "
+                f"trace_id={trace_id} source_id={source_id} command_id={command_id} "
+                f"elapsed={time.monotonic() - started_at:.2f}s"
+            )
 
             # Return updated source response
             return SourceResponse(
@@ -923,21 +1042,32 @@ async def retry_source_processing(source_id: str):
                 updated=str(source.updated),
                 command_id=command_id,
                 status="queued",
-                processing_info={"retry": True, "queued": True},
+                processing_info={"retry": True, "queued": True, "trace_id": trace_id},
             )
 
         except Exception as e:
-            logger.error(
-                f"Failed to submit retry processing command for source {source_id}: {e}"
+            logger.opt(exception=e).error(
+                "Failed to submit retry source processing command: "
+                f"trace_id={trace_id} source_id={source_id}"
             )
             raise HTTPException(
                 status_code=500, detail=f"Failed to queue retry processing: {str(e)}"
             )
 
-    except HTTPException:
+    except HTTPException as e:
+        logger.warning(
+            "Retry source processing request failed: "
+            f"trace_id={trace_id} source_id={source_id} "
+            f"status_code={e.status_code} detail={e.detail} "
+            f"elapsed={time.monotonic() - started_at:.2f}s"
+        )
         raise
     except Exception as e:
-        logger.error(f"Error retrying source processing for {source_id}: {str(e)}")
+        logger.opt(exception=e).error(
+            "Unexpected error retrying source processing: "
+            f"trace_id={trace_id} source_id={source_id} "
+            f"elapsed={time.monotonic() - started_at:.2f}s"
+        )
         raise HTTPException(
             status_code=500, detail=f"Error retrying source processing: {str(e)}"
         )

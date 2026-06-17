@@ -9,6 +9,7 @@ from open_notebook.database.repository import ensure_record_id
 from open_notebook.domain.notebook import Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.exceptions import ConfigurationError
+from open_notebook.utils.tracing import summarize_content_state
 
 try:
     from open_notebook.graphs.source import source_graph
@@ -29,12 +30,20 @@ def full_model_dump(model):
         return model
 
 
+def get_command_id(input_data: CommandInput) -> str:
+    """Extract command_id from input_data's execution context, or return 'unknown'."""
+    if input_data.execution_context:
+        return str(input_data.execution_context.command_id)
+    return "unknown"
+
+
 class SourceProcessingInput(CommandInput):
     source_id: str
     content_state: Dict[str, Any]
     notebook_ids: List[str]
     transformations: List[str]
     embed: bool
+    trace_id: Optional[str] = None
 
 
 class SourceProcessingOutput(CommandOutput):
@@ -44,6 +53,7 @@ class SourceProcessingOutput(CommandOutput):
     insights_created: int = 0
     processing_time: float
     error_message: Optional[str] = None
+    trace_id: Optional[str] = None
 
 
 @command(
@@ -65,23 +75,38 @@ async def process_source_command(
     Process source content using the source_graph workflow
     """
     start_time = time.time()
+    trace_id = input_data.trace_id or "none"
+    command_id = get_command_id(input_data)
 
     try:
-        logger.info(f"Starting source processing for source: {input_data.source_id}")
-        logger.info(f"Notebook IDs: {input_data.notebook_ids}")
-        logger.info(f"Transformations: {input_data.transformations}")
-        logger.info(f"Embed: {input_data.embed}")
+        logger.info(
+            "Starting source processing command: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={input_data.source_id} "
+            f"notebook_count={len(input_data.notebook_ids or [])} "
+            f"transformation_count={len(input_data.transformations or [])} "
+            f"embed={input_data.embed} "
+            f"content_state={summarize_content_state(input_data.content_state)}"
+        )
 
         # 1. Load transformation objects from IDs
         transformations = []
         for trans_id in input_data.transformations:
-            logger.info(f"Loading transformation: {trans_id}")
+            logger.info(
+                "Loading transformation for source processing: "
+                f"trace_id={trace_id} command_id={command_id} "
+                f"source_id={input_data.source_id} transformation_id={trans_id}"
+            )
             transformation = await Transformation.get(trans_id)
             if not transformation:
                 raise ValueError(f"Transformation '{trans_id}' not found")
             transformations.append(transformation)
 
-        logger.info(f"Loaded {len(transformations)} transformations")
+        logger.info(
+            "Loaded source transformations: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={input_data.source_id} count={len(transformations)}"
+        )
 
         # 2. Get existing source record to update its command field
         source = await Source.get(input_data.source_id)
@@ -96,12 +121,20 @@ async def process_source_command(
         )
         await source.save()
 
-        logger.info(f"Updated source {source.id} with command reference")
+        logger.info(
+            "Updated source with command reference: "
+            f"trace_id={trace_id} command_id={command_id} source_id={source.id}"
+        )
 
         # 3. Process source with all notebooks
-        logger.info(f"Processing source with {len(input_data.notebook_ids)} notebooks")
+        logger.info(
+            "Invoking source processing graph: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={input_data.source_id}"
+        )
 
         # Execute source_graph with all notebooks
+        graph_started_at = time.time()
         result = await source_graph.ainvoke(
             {  # type: ignore[arg-type]
                 "content_state": input_data.content_state,
@@ -109,7 +142,14 @@ async def process_source_command(
                 "apply_transformations": transformations,
                 "embed": input_data.embed,
                 "source_id": input_data.source_id,  # Add the source_id to the state
+                "trace_id": trace_id,
             }
+        )
+        logger.info(
+            "Source processing graph completed: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={input_data.source_id} "
+            f"duration={time.time() - graph_started_at:.2f}s"
         )
 
         processed_source = result["source"]
@@ -124,10 +164,10 @@ async def process_source_command(
         processing_time = time.time() - start_time
         embed_status = "submitted" if input_data.embed else "skipped"
         logger.info(
-            f"Successfully processed source: {processed_source.id} in {processing_time:.2f}s"
-        )
-        logger.info(
-            f"Created {insights_created} insights, embedding {embed_status}"
+            "Successfully processed source: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={processed_source.id} duration={processing_time:.2f}s "
+            f"insights_created={insights_created} embedding={embed_status}"
         )
 
         return SourceProcessingOutput(
@@ -136,22 +176,32 @@ async def process_source_command(
             embedded_chunks=0,
             insights_created=insights_created,
             processing_time=processing_time,
+            trace_id=trace_id,
         )
 
     except ValueError as e:
         # Validation errors are permanent failures - don't retry
         processing_time = time.time() - start_time
-        logger.error(f"Source processing failed: {e}")
+        logger.opt(exception=e).error(
+            "Source processing failed permanently: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={input_data.source_id} duration={processing_time:.2f}s "
+            f"content_state={summarize_content_state(input_data.content_state)}"
+        )
         return SourceProcessingOutput(
             success=False,
             source_id=input_data.source_id,
             processing_time=processing_time,
             error_message=str(e),
+            trace_id=trace_id,
         )
     except Exception as e:
         # Transient failure - will be retried (surreal-commands logs final failure)
-        logger.debug(
-            f"Transient error processing source {input_data.source_id}: {e}"
+        logger.opt(exception=e).warning(
+            "Transient error processing source; command will retry: "
+            f"trace_id={trace_id} command_id={command_id} "
+            f"source_id={input_data.source_id} "
+            f"duration={time.time() - start_time:.2f}s"
         )
         raise
 

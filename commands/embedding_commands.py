@@ -7,10 +7,11 @@ from surreal_commands import CommandInput, CommandOutput, command, submit_comman
 
 from open_notebook.ai.models import model_manager
 from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
-from open_notebook.exceptions import ConfigurationError
 from open_notebook.domain.notebook import Note, Source, SourceInsight
+from open_notebook.exceptions import ConfigurationError
 from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
+from open_notebook.utils.tracing import summarize_content_state
 
 
 def full_model_dump(model):
@@ -106,6 +107,7 @@ class EmbedSourceInput(CommandInput):
     """Input for embedding a source (creates multiple chunk embeddings)."""
 
     source_id: str
+    trace_id: Optional[str] = None
 
 
 class EmbedSourceOutput(CommandOutput):
@@ -116,6 +118,7 @@ class EmbedSourceOutput(CommandOutput):
     chunks_created: int
     processing_time: float
     error_message: Optional[str] = None
+    trace_id: Optional[str] = None
 
 
 @command(
@@ -337,9 +340,15 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
     - Does NOT retry permanent failures (ValueError for validation errors)
     """
     start_time = time.time()
+    cmd_id = get_command_id(input_data)
+    trace_id = input_data.trace_id or "none"
 
     try:
-        logger.info(f"Starting embedding for source: {input_data.source_id}")
+        logger.info(
+            "Starting source embedding command: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id}"
+        )
 
         # 1. Load source
         source = await Source.get(input_data.source_id)
@@ -349,8 +358,20 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         if not source.full_text or not source.full_text.strip():
             raise ValueError(f"Source '{input_data.source_id}' has no text to embed")
 
+        logger.info(
+            "Loaded source for embedding: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} "
+            f"content_chars={len(source.full_text)} "
+            f"asset={summarize_content_state({'file_path': source.asset.file_path if source.asset else None, 'url': source.asset.url if source.asset else None})}"
+        )
+
         # 2. DELETE existing embeddings (idempotency)
-        logger.debug(f"Deleting existing embeddings for source {input_data.source_id}")
+        logger.info(
+            "Deleting existing source embeddings before re-embed: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id}"
+        )
         await repo_query(
             "DELETE source_embedding WHERE source = $source_id",
             {"source_id": ensure_record_id(input_data.source_id)},
@@ -359,7 +380,11 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         # 3. Detect content type from file path if available
         file_path = source.asset.file_path if source.asset else None
         content_type = detect_content_type(source.full_text, file_path)
-        logger.debug(f"Detected content type: {content_type.value}")
+        logger.info(
+            "Detected source content type for embedding: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} content_type={content_type.value}"
+        )
 
         # 4. Chunk text using appropriate splitter
         chunks = chunk_text(source.full_text, content_type=content_type)
@@ -378,9 +403,14 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             raise ValueError("No chunks created after splitting text")
 
         # 5. Generate embeddings for all chunks in batches
-        cmd_id = get_command_id(input_data)
-        logger.debug(f"Generating embeddings for {total_chunks} chunks")
-        embeddings = await generate_embeddings(chunks, command_id=cmd_id)
+        logger.info(
+            "Generating source chunk embeddings: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} chunks={total_chunks}"
+        )
+        embeddings = await generate_embeddings(
+            chunks, command_id=cmd_id, trace_id=trace_id
+        )
 
         # Verify we got embeddings for all chunks
         if len(embeddings) != len(chunks):
@@ -400,13 +430,19 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings))
         ]
 
-        logger.debug(f"Inserting {len(records)} source_embedding records")
+        logger.info(
+            "Inserting source embedding records: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} records={len(records)}"
+        )
         await repo_insert("source_embedding", records)
 
         processing_time = time.time() - start_time
         logger.info(
-            f"Successfully embedded source {input_data.source_id}: "
-            f"{total_chunks} chunks in {processing_time:.2f}s"
+            "Successfully embedded source: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} chunks={total_chunks} "
+            f"duration={processing_time:.2f}s"
         )
 
         return EmbedSourceOutput(
@@ -414,14 +450,16 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             source_id=input_data.source_id,
             chunks_created=total_chunks,
             processing_time=processing_time,
+            trace_id=trace_id,
         )
 
     except ValueError as e:
         # Permanent failure - don't retry
         processing_time = time.time() - start_time
-        cmd_id = get_command_id(input_data)
-        logger.error(
-            f"Failed to embed source {input_data.source_id} (command: {cmd_id}): {e}"
+        logger.opt(exception=e).error(
+            "Failed to embed source permanently: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} duration={processing_time:.2f}s"
         )
         return EmbedSourceOutput(
             success=False,
@@ -429,13 +467,15 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             chunks_created=0,
             processing_time=processing_time,
             error_message=str(e),
+            trace_id=trace_id,
         )
     except Exception as e:
         # Transient failure - will be retried (surreal-commands logs final failure)
-        cmd_id = get_command_id(input_data)
-        logger.debug(
-            f"Transient error embedding source {input_data.source_id} "
-            f"(command: {cmd_id}): {e}"
+        logger.opt(exception=e).warning(
+            "Transient error embedding source; command will retry: "
+            f"trace_id={trace_id} command_id={cmd_id} "
+            f"source_id={input_data.source_id} "
+            f"duration={time.time() - start_time:.2f}s"
         )
         raise
 

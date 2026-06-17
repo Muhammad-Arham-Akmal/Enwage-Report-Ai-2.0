@@ -109,7 +109,9 @@ async def mean_pool_embeddings(embeddings: List[List[float]]) -> List[float]:
 
 
 async def generate_embeddings(
-    texts: List[str], command_id: Optional[str] = None
+    texts: List[str],
+    command_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> List[List[float]]:
     """
     Generate embeddings for multiple texts with automatic batching and retry.
@@ -142,6 +144,13 @@ async def generate_embeddings(
         )
 
     model_name = getattr(embedding_model, "model_name", "unknown")
+    total_batches = (len(texts) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+    logger.info(
+        "Embedding generation starting: "
+        f"trace_id={trace_id} command_id={command_id} model={model_name!r} "
+        f"texts={len(texts)} batches={total_batches} "
+        f"batch_size={EMBEDDING_BATCH_SIZE}"
+    )
 
     # Log text sizes for debugging
     metrics: tuple[int, int, int, int] | None = None
@@ -169,32 +178,44 @@ async def generate_embeddings(
     )
 
     all_embeddings: List[List[float]] = []
-    total_batches = (len(texts) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
 
     for batch_idx in range(total_batches):
         start = batch_idx * EMBEDDING_BATCH_SIZE
         end = start + EMBEDDING_BATCH_SIZE
         batch = texts[start:end]
+        logger.debug(
+            "Embedding batch starting: "
+            f"trace_id={trace_id} command_id={command_id} model={model_name!r} "
+            f"batch={batch_idx + 1}/{total_batches} texts={len(batch)}"
+        )
 
         for attempt in range(1, EMBEDDING_MAX_RETRIES + 1):
             try:
                 batch_embeddings = await embedding_model.aembed(batch)
                 all_embeddings.extend(batch_embeddings)
+                logger.debug(
+                    "Embedding batch completed: "
+                    f"trace_id={trace_id} command_id={command_id} "
+                    f"model={model_name!r} batch={batch_idx + 1}/{total_batches} "
+                    f"attempt={attempt} embeddings={len(batch_embeddings)}"
+                )
                 break
             except Exception as e:
                 cmd_context = f" (command: {command_id})" if command_id else ""
                 if attempt < EMBEDDING_MAX_RETRIES:
-                    logger.debug(
-                        f"Embedding batch {batch_idx + 1}/{total_batches} "
-                        f"attempt {attempt}/{EMBEDDING_MAX_RETRIES} failed "
-                        f"using model '{model_name}'{cmd_context}: {e}. Retrying..."
+                    logger.opt(exception=e).warning(
+                        "Embedding batch attempt failed; retrying: "
+                        f"trace_id={trace_id} command_id={command_id} "
+                        f"model={model_name!r} batch={batch_idx + 1}/{total_batches} "
+                        f"attempt={attempt}/{EMBEDDING_MAX_RETRIES}{cmd_context}"
                     )
                     await asyncio.sleep(EMBEDDING_RETRY_DELAY)
                 else:
-                    logger.debug(
-                        f"Embedding batch {batch_idx + 1}/{total_batches} "
-                        f"failed after {EMBEDDING_MAX_RETRIES} attempts "
-                        f"using model '{model_name}'{cmd_context}: {e}"
+                    logger.opt(exception=e).error(
+                        "Embedding batch failed after retries: "
+                        f"trace_id={trace_id} command_id={command_id} "
+                        f"model={model_name!r} batch={batch_idx + 1}/{total_batches} "
+                        f"attempts={EMBEDDING_MAX_RETRIES}{cmd_context}"
                     )
                     raise RuntimeError(
                         f"Failed to generate embeddings using model '{model_name}' "
@@ -202,7 +223,11 @@ async def generate_embeddings(
                         f"{len(batch)} texts): {e}"
                     ) from e
 
-    logger.debug(f"Generated {len(all_embeddings)} embeddings in {total_batches} batch(es)")
+    logger.info(
+        "Embedding generation completed: "
+        f"trace_id={trace_id} command_id={command_id} model={model_name!r} "
+        f"embeddings={len(all_embeddings)} batches={total_batches}"
+    )
     return all_embeddings
 
 

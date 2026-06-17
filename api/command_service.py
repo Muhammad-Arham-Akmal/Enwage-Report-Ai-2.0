@@ -3,6 +3,24 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from surreal_commands import get_command_status, submit_command
 
+from open_notebook.utils.tracing import summarize_content_state
+
+
+def _summarize_command_args(command_args: Dict[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {"keys": sorted(command_args.keys())}
+    for key in ("source_id", "trace_id", "embed"):
+        if key in command_args:
+            summary[key] = command_args[key]
+
+    if "notebook_ids" in command_args:
+        summary["notebook_count"] = len(command_args.get("notebook_ids") or [])
+    if "transformations" in command_args:
+        summary["transformation_count"] = len(command_args.get("transformations") or [])
+    if "content_state" in command_args:
+        summary["content_state"] = summarize_content_state(command_args["content_state"])
+
+    return summary
+
 
 class CommandService:
     """Generic service layer for command operations"""
@@ -15,13 +33,23 @@ class CommandService:
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Submit a generic command job for background processing"""
+        trace_id = (context or {}).get("trace_id") or command_args.get("trace_id")
         try:
+            logger.info(
+                "Submitting command job: "
+                f"trace_id={trace_id} app={module_name} command={command_name} "
+                f"args={_summarize_command_args(command_args)} context={context or {}}"
+            )
+
             # Ensure command modules are imported before submitting
             # This is needed because submit_command validates against local registry
             try:
                 import commands.podcast_commands  # noqa: F401
             except ImportError as import_err:
-                logger.error(f"Failed to import command modules: {import_err}")
+                logger.opt(exception=import_err).error(
+                    "Failed to import command modules before command submit: "
+                    f"trace_id={trace_id} app={module_name} command={command_name}"
+                )
                 raise ValueError("Command modules not available")
 
             # surreal-commands expects: submit_command(app_name, command_name, args)
@@ -35,18 +63,25 @@ class CommandService:
                 raise ValueError("Failed to get cmd_id from submit_command")
             cmd_id_str = str(cmd_id)
             logger.info(
-                f"Submitted command job: {cmd_id_str} for {module_name}.{command_name}"
+                "Submitted command job: "
+                f"trace_id={trace_id} command_id={cmd_id_str} "
+                f"app={module_name} command={command_name}"
             )
             return cmd_id_str
 
         except Exception as e:
-            logger.error(f"Failed to submit command job: {e}")
+            logger.opt(exception=e).error(
+                "Failed to submit command job: "
+                f"trace_id={trace_id} app={module_name} command={command_name} "
+                f"args={_summarize_command_args(command_args)}"
+            )
             raise
 
     @staticmethod
     async def get_command_status(job_id: str) -> Dict[str, Any]:
         """Get status of any command job"""
         try:
+            logger.debug(f"Fetching command status: job_id={job_id}")
             status = await get_command_status(job_id)
             return {
                 "job_id": job_id,
@@ -64,7 +99,9 @@ class CommandService:
                 "progress": getattr(status, "progress", None) if status else None,
             }
         except Exception as e:
-            logger.error(f"Failed to get command status: {e}")
+            logger.opt(exception=e).error(
+                f"Failed to get command status: job_id={job_id}"
+            )
             raise
 
     @staticmethod
